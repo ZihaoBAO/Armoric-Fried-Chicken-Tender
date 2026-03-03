@@ -12,6 +12,7 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
+import requests
 
 from database.connection import get_session
 from ml.campaign_analysis import (
@@ -134,8 +135,51 @@ with tab1:
         st.warning("No sales data available.")
 
 # ============ TAB 2: Campaign Feedback ============
+API_URL = "http://api:8000"
+
 with tab2:
     st.header("Campaign Feedback Analysis")
+
+    # --- Submit New Feedback ---
+    st.subheader("Submit New Feedback")
+    with st.form("feedback_form", clear_on_submit=True):
+        col_f1, col_f2 = st.columns(2)
+        with col_f1:
+            fb_username = st.text_input("Username", placeholder="e.g. user42")
+            fb_campaign = st.text_input("Campaign ID", placeholder="e.g. CAMP123")
+        with col_f2:
+            fb_comment = st.text_area("Comment", placeholder="Write your feedback here...")
+
+        submitted = st.form_submit_button("Submit Feedback")
+
+        if submitted:
+            if not fb_username or not fb_campaign or not fb_comment:
+                st.error("Please fill in all fields.")
+            else:
+                try:
+                    resp = requests.post(
+                        f"{API_URL}/feedback",
+                        json={
+                            "username": fb_username,
+                            "campaign_id": fb_campaign,
+                            "comment": fb_comment,
+                        },
+                        timeout=10,
+                    )
+                    if resp.status_code == 201:
+                        result = resp.json()
+                        st.success(
+                            f"Feedback submitted! Sentiment: **{result['sentiment']}** "
+                            f"(score: {result['sentiment_score']:.2f})"
+                        )
+                        st.cache_data.clear()
+                        st.rerun()
+                    else:
+                        st.error(f"API error: {resp.status_code} - {resp.text}")
+                except requests.exceptions.ConnectionError:
+                    st.error("Cannot connect to the API. Make sure the API service is running.")
+
+    st.markdown("---")
 
     if not feedback_df.empty:
         col_s1, col_s2, col_s3 = st.columns(3)
@@ -148,13 +192,19 @@ with tab2:
 
         with col_c:
             st.subheader("Sentiment Distribution")
-            fig_sent = px.pie(
-                values=sentiment_counts.values,
-                names=sentiment_counts.index,
-                title="Feedback Sentiment Distribution",
-                color=sentiment_counts.index,
+            sent_df = sentiment_counts.reset_index()
+            sent_df.columns = ["sentiment", "count"]
+            sent_df = sent_df.sort_values("count", ascending=True)
+            fig_sent = px.bar(
+                sent_df, x="count", y="sentiment", orientation="h",
+                title="Feedback Sentiment Breakdown",
+                labels={"count": "Number of Feedbacks", "sentiment": ""},
+                color="sentiment",
                 color_discrete_map={"positive": "#2ecc71", "neutral": "#f39c12", "negative": "#e74c3c"},
+                text="count",
             )
+            fig_sent.update_traces(textposition="outside")
+            fig_sent.update_layout(showlegend=False)
             st.plotly_chart(fig_sent, use_container_width=True)
 
         with col_d:
@@ -195,24 +245,42 @@ with tab3:
     st.header("Campaign Impact on Sales")
 
     if not perf_df.empty:
+        # --- Filters ---
+        all_campaigns = sorted(perf_df["campaign_id"].unique())
+        selected_campaigns = st.multiselect(
+            "Filter by Campaign", options=all_campaigns, default=[]
+        )
+
+        filtered_perf = perf_df.copy()
+        if selected_campaigns:
+            filtered_perf = filtered_perf[filtered_perf["campaign_id"].isin(selected_campaigns)]
+
+        # Sort by feedback_count desc, then avg_sentiment_score desc
+        filtered_perf = filtered_perf.sort_values(
+            ["feedback_count", "avg_sentiment_score"], ascending=[False, False]
+        )
+
+        display_df = filtered_perf.head(100)
+
         st.subheader("Campaign Performance")
         fig_perf = px.bar(
-            perf_df.head(20),
+            display_df,
             x="campaign_id", y="avg_sentiment_score",
             color="feedback_count",
-            title="Campaign Sentiment Scores (Top 20)",
+            title=f"Campaign Sentiment Scores ({len(display_df)} campaigns)",
             labels={
                 "campaign_id": "Campaign",
                 "avg_sentiment_score": "Avg Sentiment Score",
                 "feedback_count": "# Feedbacks",
             },
             color_continuous_scale="RdYlGn",
+            hover_data=["feedback_count", "positive_count", "neutral_count", "negative_count"],
         )
-        fig_perf.update_layout(xaxis_tickangle=-45)
+        fig_perf.update_layout(xaxis_tickangle=-45, height=500)
         st.plotly_chart(fig_perf, use_container_width=True)
 
         st.subheader("Campaign Details")
-        st.dataframe(perf_df, use_container_width=True, height=300)
+        st.dataframe(filtered_perf, use_container_width=True, height=400)
     else:
         st.warning("No campaign performance data available.")
 
